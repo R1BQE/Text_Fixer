@@ -4,13 +4,18 @@
 # See the file COPYING.txt for more details.
 
 """Clipboard helpers: full best-effort backup/restore plus simple text
-get/set, built on top of pywin32's ``win32clipboard`` (bundled with NVDA).
+get/set, built directly on the Win32 API through ctypes.
+
+pywin32 (``win32clipboard``) is no longer bundled with recent NVDA releases,
+so this module talks to user32/kernel32 directly. ctypes is always available
+inside NVDA.
 """
+
+import ctypes
+from ctypes import wintypes
 
 import time
 
-import win32clipboard
-import win32con
 from logHandler import log
 
 _OPEN_RETRIES = 15
@@ -18,16 +23,99 @@ _OPEN_RETRY_DELAY = 0.02
 _CHANGE_POLL_TIMEOUT = 0.5
 _CHANGE_POLL_INTERVAL = 0.02
 
+CF_UNICODETEXT = 13
+
+_GMEM_MOVEABLE = 0x0002
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+
+user32.CloseClipboard.restype = wintypes.BOOL
+user32.CloseClipboard.argtypes = []
+
+user32.EmptyClipboard.restype = wintypes.BOOL
+user32.EmptyClipboard.argtypes = []
+
+user32.EnumClipboardFormats.restype = wintypes.UINT
+user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
+
+user32.GetClipboardData.restype = wintypes.HANDLE
+user32.GetClipboardData.argtypes = [wintypes.UINT]
+
+user32.SetClipboardData.restype = wintypes.HANDLE
+user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+
+user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+
+user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
+user32.GetClipboardSequenceNumber.argtypes = []
+
+kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+
+kernel32.GlobalLock.restype = wintypes.LPVOID
+kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+
+kernel32.GlobalUnlock.restype = wintypes.BOOL
+kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+
+kernel32.GlobalFree.restype = wintypes.HGLOBAL
+kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+
+kernel32.GlobalSize.restype = ctypes.c_size_t
+kernel32.GlobalSize.argtypes = [wintypes.HGLOBAL]
+
+
+def _read_global_memory(hGlobal: int) -> bytes | None:
+	"""Copy the bytes behind a global memory handle into a ``bytes`` object."""
+	addr = kernel32.GlobalLock(hGlobal)
+	if not addr:
+		return None
+	try:
+		size = kernel32.GlobalSize(hGlobal)
+		if size == 0:
+			return b""
+		return ctypes.string_at(addr, size)
+	finally:
+		kernel32.GlobalUnlock(hGlobal)
+
+
+def _alloc_global_memory(data: bytes) -> int | None:
+	"""Allocate GMEM_MOVEABLE memory filled with ``data``, returning the handle.
+
+	The caller owns the handle and must free it with ``GlobalFree`` unless it
+	is handed over to the clipboard via ``SetClipboardData``, which takes
+	ownership on success.
+	"""
+	size = len(data) or 1  # GlobalAlloc of zero bytes fails
+	hGlobal = kernel32.GlobalAlloc(_GMEM_MOVEABLE, size)
+	if not hGlobal:
+		return None
+	addr = kernel32.GlobalLock(hGlobal)
+	if not addr:
+		kernel32.GlobalFree(hGlobal)
+		return None
+	try:
+		ctypes.memmove(addr, data, len(data))
+	finally:
+		kernel32.GlobalUnlock(hGlobal)
+	return hGlobal
+
 
 def _openClipboard() -> bool:
 	"""Try to open the clipboard, retrying briefly since another process may
 	be holding it momentarily."""
 	for _attempt in range(_OPEN_RETRIES):
 		try:
-			win32clipboard.OpenClipboard()
-			return True
+			if user32.OpenClipboard(None):
+				return True
 		except Exception:
-			time.sleep(_OPEN_RETRY_DELAY)
+			pass
+		time.sleep(_OPEN_RETRY_DELAY)
 	return False
 
 
@@ -36,19 +124,19 @@ def getSequenceNumber() -> int:
 	a Ctrl+C actually updated the clipboard instead of guessing with a fixed
 	delay."""
 	try:
-		return win32clipboard.GetClipboardSequenceNumber()
+		return user32.GetClipboardSequenceNumber()
 	except Exception:
 		return -1
 
 
-def backupClipboard() -> dict[int, object]:
+def backupClipboard() -> dict[int, bytes]:
 	"""Best-effort save of every format currently on the clipboard.
 
 	Some formats (e.g. ones backed by GDI handles) may fail to read; those
 	are simply skipped rather than aborting the whole backup, so that at
 	least the text content is preserved as required.
 	"""
-	backup: dict[int, object] = {}
+	backup: dict[int, bytes] = {}
 	if not _openClipboard():
 		log.error("Text Fixer: could not open clipboard to back it up")
 		return backup
@@ -56,21 +144,23 @@ def backupClipboard() -> dict[int, object]:
 		clipFormat = 0
 		while True:
 			try:
-				clipFormat = win32clipboard.EnumClipboardFormats(clipFormat)
+				clipFormat = user32.EnumClipboardFormats(clipFormat)
 			except Exception:
 				break
 			if not clipFormat:
 				break
 			try:
-				backup[clipFormat] = win32clipboard.GetClipboardData(clipFormat)
+				data = _read_global_memory(user32.GetClipboardData(clipFormat))
+				if data is not None:
+					backup[clipFormat] = data
 			except Exception as e:
 				log.debug(f"Text Fixer: could not back up clipboard format {clipFormat}: {e}")
 	finally:
-		win32clipboard.CloseClipboard()
+		user32.CloseClipboard()
 	return backup
 
 
-def restoreClipboard(backup: dict[int, object]) -> bool:
+def restoreClipboard(backup: dict[int, bytes]) -> bool:
 	"""Restore a backup produced by :func:`backupClipboard`.
 
 	Always attempted from a ``finally`` block by the caller so the user's
@@ -82,19 +172,31 @@ def restoreClipboard(backup: dict[int, object]) -> bool:
 	ok = True
 	try:
 		try:
-			win32clipboard.EmptyClipboard()
+			user32.EmptyClipboard()
 		except Exception as e:
 			log.error(f"Text Fixer: could not empty clipboard while restoring: {e}")
 			ok = False
 		for clipFormat, data in backup.items():
 			try:
-				win32clipboard.SetClipboardData(clipFormat, data)
+				hGlobal = _alloc_global_memory(data)
+				if not hGlobal:
+					ok = False
+					continue
+				# On success the clipboard takes ownership of the handle.
+				if not user32.SetClipboardData(clipFormat, hGlobal):
+					kernel32.GlobalFree(hGlobal)
+					ok = False
 			except Exception as e:
 				log.debug(f"Text Fixer: could not restore clipboard format {clipFormat}: {e}")
 				ok = False
 	finally:
-		win32clipboard.CloseClipboard()
+		user32.CloseClipboard()
 	return ok
+
+
+def _decode_text(data: bytes) -> str:
+	"""Decode UTF-16 clipboard bytes into ``str``, dropping the terminator."""
+	return data.decode("utf-16-le", errors="surrogatepass").rstrip("\x00")
 
 
 def getText() -> str | None:
@@ -104,15 +206,18 @@ def getText() -> str | None:
 		log.error("Text Fixer: could not open clipboard to read text")
 		return None
 	try:
-		if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+		if not user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
 			return None
 		try:
-			return win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+			data = _read_global_memory(user32.GetClipboardData(CF_UNICODETEXT))
 		except Exception as e:
 			log.error(f"Text Fixer: could not read clipboard text: {e}")
 			return None
+		if data is None:
+			return None
+		return _decode_text(data)
 	finally:
-		win32clipboard.CloseClipboard()
+		user32.CloseClipboard()
 
 
 def setText(text: str) -> bool:
@@ -122,14 +227,21 @@ def setText(text: str) -> bool:
 		return False
 	try:
 		try:
-			win32clipboard.EmptyClipboard()
-			win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
-			return True
+			user32.EmptyClipboard()
 		except Exception as e:
-			log.error(f"Text Fixer: could not write clipboard text: {e}")
+			log.error(f"Text Fixer: could not empty clipboard while writing text: {e}")
 			return False
+		data = text.encode("utf-16-le", errors="surrogatepass") + b"\x00\x00"
+		hGlobal = _alloc_global_memory(data)
+		if not hGlobal:
+			return False
+		# On success the clipboard takes ownership of the handle.
+		if not user32.SetClipboardData(CF_UNICODETEXT, hGlobal):
+			kernel32.GlobalFree(hGlobal)
+			return False
+		return True
 	finally:
-		win32clipboard.CloseClipboard()
+		user32.CloseClipboard()
 
 
 def waitForClipboardChange(previousSequence: int, timeout: float = _CHANGE_POLL_TIMEOUT) -> bool:
