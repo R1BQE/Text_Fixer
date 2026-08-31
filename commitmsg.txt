@@ -1,0 +1,1 @@
+Set baseLanguage to ru to match the add-on's actual language 
