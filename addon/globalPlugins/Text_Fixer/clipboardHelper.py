@@ -20,12 +20,24 @@ from logHandler import log
 
 _OPEN_RETRIES = 15
 _OPEN_RETRY_DELAY = 0.02
-_CHANGE_POLL_TIMEOUT = 0.5
+# Some applications take noticeably longer to place their content on the
+# clipboard after a Ctrl+C (heavy web pages, delayed rendering). 0.5 s was
+# too tight and produced false "no selection" results.
+_CHANGE_POLL_TIMEOUT = 2.5
 _CHANGE_POLL_INTERVAL = 0.02
 
+#: Delayed rendering: an application may bump the clipboard sequence number
+#: before its data is actually readable. Retry reading briefly instead of
+#: giving up on the first NULL/absent format.
+_READ_RETRIES = 10
+_READ_RETRY_DELAY = 0.03
+
 CF_UNICODETEXT = 13
+CF_TEXT = 1
 
 _GMEM_MOVEABLE = 0x0002
+
+_ANSI_FALLBACK_CP = 1252
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -68,6 +80,9 @@ kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
 
 kernel32.GlobalSize.restype = ctypes.c_size_t
 kernel32.GlobalSize.argtypes = [wintypes.HGLOBAL]
+
+kernel32.GetACP.restype = wintypes.UINT
+kernel32.GetACP.argtypes = []
 
 
 def _read_global_memory(hGlobal: int) -> bytes | None:
@@ -194,28 +209,56 @@ def restoreClipboard(backup: dict[int, bytes]) -> bool:
 	return ok
 
 
-def _decode_text(data: bytes) -> str:
-	"""Decode UTF-16 clipboard bytes into ``str``, dropping the terminator."""
-	return data.decode("utf-16-le", errors="surrogatepass").rstrip("\x00")
+def _decode_text(data: bytes, encoding: str = "utf-16-le", errors: str = "surrogatepass") -> str:
+	"""Decode clipboard bytes into ``str``, dropping the terminator."""
+	return data.decode(encoding, errors=errors).rstrip("\x00")
+
+
+def _get_ansi_codepage() -> int:
+	"""Return the system ANSI code page (e.g. 1251 for Russian Windows),
+	used to decode CF_TEXT content. Falls back to a sane default."""
+	try:
+		acp = kernel32.GetACP()
+		return acp if acp else _ANSI_FALLBACK_CP
+	except Exception:
+		return _ANSI_FALLBACK_CP
+
+
+def _read_clipboard_text() -> str | None:
+	"""Read the clipboard's text, preferring CF_UNICODETEXT and falling back
+	to CF_TEXT (ANSI) for applications that only provide the legacy format.
+
+	Retries briefly to ride out delayed rendering, where an application
+	updates the clipboard sequence number but only serves the actual data a
+	moment later."""
+	for _attempt in range(_READ_RETRIES):
+		if user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+			hGlobal = user32.GetClipboardData(CF_UNICODETEXT)
+			data = _read_global_memory(hGlobal) if hGlobal else None
+			if data is not None:
+				return _decode_text(data)
+		elif user32.IsClipboardFormatAvailable(CF_TEXT):
+			hGlobal = user32.GetClipboardData(CF_TEXT)
+			data = _read_global_memory(hGlobal) if hGlobal else None
+			if data is not None:
+				return _decode_text(data, f"cp{_get_ansi_codepage()}", "replace")
+		time.sleep(_READ_RETRY_DELAY)
+	return None
 
 
 def getText() -> str | None:
-	"""Return the current Unicode text on the clipboard, or ``None`` if there
-	is none / it could not be read."""
+	"""Return the current text on the clipboard, or ``None`` if there is
+	none / it could not be read."""
 	if not _openClipboard():
 		log.error("Text Fixer: could not open clipboard to read text")
 		return None
 	try:
-		if not user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
-			return None
-		try:
-			data = _read_global_memory(user32.GetClipboardData(CF_UNICODETEXT))
-		except Exception as e:
-			log.error(f"Text Fixer: could not read clipboard text: {e}")
-			return None
-		if data is None:
-			return None
-		return _decode_text(data)
+		text = _read_clipboard_text()
+		if text is None:
+			hasUnicode = bool(user32.IsClipboardFormatAvailable(CF_UNICODETEXT))
+			hasAnsi = bool(user32.IsClipboardFormatAvailable(CF_TEXT))
+			log.debug(f"Text Fixer: no readable text on clipboard (unicode={hasUnicode}, ansi={hasAnsi})")
+		return text
 	finally:
 		user32.CloseClipboard()
 
@@ -257,4 +300,7 @@ def waitForClipboardChange(previousSequence: int, timeout: float = _CHANGE_POLL_
 		if getSequenceNumber() != previousSequence:
 			return True
 		time.sleep(_CHANGE_POLL_INTERVAL)
-	return getSequenceNumber() != previousSequence
+	changed = getSequenceNumber() != previousSequence
+	if not changed:
+		log.debug("Text Fixer: clipboard did not change within the polling window")
+	return changed

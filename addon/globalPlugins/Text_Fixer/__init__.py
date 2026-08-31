@@ -87,10 +87,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				return _STATUS_COPY_FAILED, None
 			changed = clipboardHelper.waitForClipboardChange(previousSequence)
 			if not changed:
+				log.info("Text Fixer: Ctrl+C produced no clipboard change")
 				return _STATUS_NO_SELECTION, None
 			text = clipboardHelper.getText()
 			if text is None:
+				log.info("Text Fixer: clipboard changed but no text could be read back")
 				return _STATUS_COPY_FAILED, None
+			log.debug(f"Text Fixer: copied selection ({len(text)} chars)")
 			return _STATUS_OK, text
 		finally:
 			clipboardHelper.restoreClipboard(backup)

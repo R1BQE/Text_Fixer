@@ -23,10 +23,10 @@ addon_info = AddonInfo(
 	# Translators: Long description to be shown for this add-on on add-on information from add-on store
 	addon_description=_("""NVDA Text Fixer помогает быстро приводить выделенный текст в порядок: исправляет регистр в начале предложений и строк, убирает лишние пробелы и пробелы перед знаками препинания. Также позволяет переключать выделенный текст между установленными раскладками клавиатуры."""),
 	# version
-	addon_version="2026.8.31.2",
+	addon_version="2026.8.31.3",
 	# Brief changelog for this version
 	# Translators: what's new content for the add-on version to be shown in the add-on store
-	addon_changelog=_("""Исправление: аддон снова загружается в NVDA 2024.1+ — работа с буфером обмена переписана на системный Win32 API вместо удалённого из NVDA модуля win32clipboard."""),
+	addon_changelog=_("""Исправление: чтение выделенного текста теперь надёжнее — добавлен запасной вариант чтения из буфера обмена для приложений, которые передают текст в ANSI-кодировке, увеличено время ожидания ответа приложения на Ctrl+C и добавлен повтор чтения при отложенной передаче данных."""),
 	# Author(s)
 	addon_author="R1BQE",
 	# URL for the add-on documentation support
