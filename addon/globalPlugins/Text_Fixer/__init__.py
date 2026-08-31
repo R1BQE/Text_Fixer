@@ -130,6 +130,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		transform(text)
 
 	@script(
+		# Translators: category shown for this add-on's commands in the NVDA
+		# Input Gestures dialog. Kept in sync with `scriptCategory` below.
+		category=_("Text Fixer"),
 		# Translators: name of the command shown in the NVDA Input Gestures dialog.
 		description=_("Причесать выделенный текст"),
 	)
@@ -137,6 +140,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		self._handleCommand(self._cleanupText)
 
 	@script(
+		# Translators: category shown for this add-on's commands in the NVDA
+		# Input Gestures dialog. Kept in sync with `scriptCategory` below.
+		category=_("Text Fixer"),
 		# Translators: name of the command shown in the NVDA Input Gestures dialog.
 		description=_("Переключить раскладку выделенного текста"),
 	)
