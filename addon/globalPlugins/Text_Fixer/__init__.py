@@ -19,9 +19,11 @@ import wx
 
 import api
 import controlTypes
+import globalCommands
 import globalPluginHandler
 import gui
 import keyboardHandler
+import textInfos
 import tones
 import ui
 from logHandler import log
@@ -69,14 +71,21 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	scriptCategory = _("Text Fixer")
 
 	def _copySelectionText(self) -> tuple[str, str | None]:
-		"""Copy the current selection to the clipboard, read it back, then
-		restore the user's original clipboard content.
+		"""Get the selected text to process.
 
-		Returns a ``(status, text)`` tuple. ``status`` is one of
-		``_STATUS_OK``, ``_STATUS_NO_SELECTION`` (Ctrl+C produced no
-		clipboard change - nothing was selected) or ``_STATUS_COPY_FAILED``
-		(the clipboard changed but the text could not be read back).
+		Reads the selection directly through NVDA's object model first (no
+		clipboard, no injected keys) because other add-ons and application
+		overlays can intercept or break Ctrl+C. Falls back to the clipboard
+		for objects that expose no selection through TextInfo.
+
+		Returns a ``(status, text)`` tuple with ``status`` one of
+		``_STATUS_OK``, ``_STATUS_NO_SELECTION`` (nothing was selected) or
+		``_STATUS_COPY_FAILED`` (the selection could not be read).
 		"""
+		text = self._readSelectionDirect()
+		if text is not None:
+			log.debug(f"Text Fixer: read selection directly ({len(text)} chars)")
+			return _STATUS_OK, text
 		backup = clipboardHelper.backupClipboard()
 		try:
 			previousSequence = clipboardHelper.getSequenceNumber()
@@ -97,6 +106,65 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			return _STATUS_OK, text
 		finally:
 			clipboardHelper.restoreClipboard(backup)
+
+	def _readSelectionDirect(self) -> str | None:
+		"""Read the selected text through NVDA's object model - no clipboard,
+		no injected keys, so it also works when other add-ons intercept
+		Ctrl+C.
+
+		Tries the focused object's real selection first, then a review-cursor
+		selection (text marked with NVDA+F9 / the review cursor). Returns
+		``None`` when there is no readable selection.
+		"""
+		obj = api.getFocusObject()
+		if obj is not None:
+			try:
+				info = obj.makeTextInfo(textInfos.POSITION_SELECTION)
+				if info is not None and not info.isCollapsed:
+					text = info.text
+					if text:
+						return text
+			except Exception as e:
+				log.debug(f"Text Fixer: could not read object selection: {e}")
+		try:
+			return self._readReviewSelection()
+		except Exception as e:
+			log.debug(f"Text Fixer: could not read review selection: {e}")
+			return None
+
+	def _readReviewSelection(self) -> str | None:
+		"""Read a review-cursor selection: text marked with NVDA+F9 (start)
+		and the review cursor moved to its end, even when the application
+		itself has no real selection.
+
+		Also re-applies the range as the application's real selection so the
+		later paste replaces exactly the marked text.
+		"""
+		pos = api.getReviewPosition().copy()
+		gc = globalCommands.commands
+		startMarker = gc._getReviewCopyStartMarker(pos)
+		if startMarker is None:
+			return None
+		copyMarker = startMarker.copy()
+		if pos.compareEndPoints(startMarker, "endToEnd") > 0:
+			# Review cursor moved forward from the start marker.
+			copyMarker.setEndPoint(startMarker, "startToStart")
+			copyMarker.setEndPoint(pos, "endToEnd")
+		else:
+			# Review cursor is at or before the start marker.
+			copyMarker.setEndPoint(pos, "startToStart")
+			copyMarker.setEndPoint(startMarker, "endToEnd")
+		copyMarker.move(textInfos.UNIT_CHARACTER, 1, endPoint="end")
+		if copyMarker.compareEndPoints(copyMarker, "startToEnd") == 0:
+			return None
+		text = copyMarker.text
+		if not text:
+			return None
+		try:
+			copyMarker.updateSelection()
+		except Exception as e:
+			log.debug(f"Text Fixer: could not re-apply review selection: {e}")
+		return text
 
 	def _pasteText(self, newText: str) -> bool:
 		"""Put ``newText`` on the clipboard, paste it over the current

@@ -20,10 +20,10 @@ from logHandler import log
 
 _OPEN_RETRIES = 15
 _OPEN_RETRY_DELAY = 0.02
-# Some applications take noticeably longer to place their content on the
-# clipboard after a Ctrl+C (heavy web pages, delayed rendering). 0.5 s was
-# too tight and produced false "no selection" results.
-_CHANGE_POLL_TIMEOUT = 2.5
+# This path is a fallback used only when the selection cannot be read
+# directly through NVDA's object model. Keep the poll short: it blocks the
+# NVDA main thread, and past ~2 s NVDA's watchdog flags a freeze.
+_CHANGE_POLL_TIMEOUT = 1.5
 _CHANGE_POLL_INTERVAL = 0.02
 
 #: Delayed rendering: an application may bump the clipboard sequence number
