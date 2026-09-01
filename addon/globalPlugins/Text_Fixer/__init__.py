@@ -26,6 +26,7 @@ import keyboardHandler
 import textInfos
 import tones
 import ui
+import winUser
 from logHandler import log
 from scriptHandler import script
 
@@ -38,9 +39,20 @@ from .layoutDialog import LayoutChoiceDialog
 _SUCCESS_BEEP = (1000, 60)
 _ERROR_BEEP = (200, 100)
 
-# A short pause after sending Ctrl+V, giving the target application time to
-# read the clipboard before it is restored to the user's original content.
-_PASTE_SETTLE_DELAY = 0.1
+# A pause after sending Ctrl+V, giving the target application time to read the
+# clipboard before it is restored to the user's original content. Deliberately
+# generous: the success beep that follows the paste is the signal that the
+# action is complete and the user can do anything next, so the app must have
+# actually received the text by then.
+_PASTE_SETTLE_DELAY = 0.4
+
+# Virtual-key codes used for the raw key injection (winUser has no letter
+# constants). KEYEVENTF_KEYUP moved to winBindings in current NVDA, so the
+# literal 0x0002 is used here.
+_VK_CONTROL = 0x11
+_VK_C = 0x43
+_VK_V = 0x56
+_KEYUP = 0x0002
 
 _STATUS_OK = "ok"
 _STATUS_NO_SELECTION = "no_selection"
@@ -89,10 +101,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		backup = clipboardHelper.backupClipboard()
 		try:
 			previousSequence = clipboardHelper.getSequenceNumber()
-			try:
-				keyboardHandler.KeyboardInputGesture.fromName("control+c").send()
-			except Exception as e:
-				log.error(f"Text Fixer: could not send Ctrl+C: {e}")
+			if not self._sendKeyCombo(_VK_C):
 				return _STATUS_COPY_FAILED, None
 			changed = clipboardHelper.waitForClipboardChange(previousSequence)
 			if not changed:
@@ -166,18 +175,46 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			log.debug(f"Text Fixer: could not re-apply review selection: {e}")
 		return text
 
+	def _sendKeyCombo(self, vk: int) -> bool:
+		"""Inject Ctrl+<vk> into the foreground application.
+
+		Sends the keys directly with ``keybd_event`` inside NVDA's
+		ignore-injection context rather than through
+		``KeyboardInputGesture.send()``. NVDA's gesture machinery resolves the
+		keyboard layout through the UIA tree (``getInputHkl`` ->
+		``windowThreadID``) before injecting, and that walk raises
+		``_ctypes.COMError`` in some applications (UWP, Chrome), aborting the
+		whole paste/copy. Injecting the keys directly skips that resolution
+		entirely.
+		"""
+		ctrlDown = bool(winUser.getKeyState(winUser.VK_CONTROL) & 0x8000)
+		try:
+			with keyboardHandler.ignoreInjection():
+				if not ctrlDown:
+					winUser.keybd_event(winUser.VK_CONTROL, 0, 0, 0)
+				winUser.keybd_event(vk, 0, 0, 0)
+				winUser.keybd_event(vk, 0, _KEYUP, 0)
+				if not ctrlDown:
+					winUser.keybd_event(winUser.VK_CONTROL, 0, _KEYUP, 0)
+			return True
+		except Exception:
+			log.exception("Text Fixer: could not inject Ctrl+%#x", vk)
+			return False
+
 	def _pasteText(self, newText: str) -> bool:
 		"""Put ``newText`` on the clipboard, paste it over the current
 		selection with Ctrl+V, then restore the user's original clipboard
-		content. Returns ``True`` on success."""
+		content. Returns ``True`` on success.
+
+		The settle delay is deliberately generous: the target application must
+		actually read the clipboard before it is restored, and the success
+		beep that follows this call is the signal that the action is complete.
+		"""
 		backup = clipboardHelper.backupClipboard()
 		try:
 			if not clipboardHelper.setText(newText):
 				return False
-			try:
-				keyboardHandler.KeyboardInputGesture.fromName("control+v").send()
-			except Exception as e:
-				log.error(f"Text Fixer: could not send Ctrl+V: {e}")
+			if not self._sendKeyCombo(_VK_V):
 				return False
 			time.sleep(_PASTE_SETTLE_DELAY)
 			return True
@@ -240,15 +277,42 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			# keyboard layouts to convert between.
 			ui.message(_("Недостаточно установленных раскладок для переключения."))
 			return
+		try:
+			tables = {layout.hkl: winLayout.build_layout_char_table(layout.hkl) for layout in layouts}
+		except Exception as e:
+			log.error(f"Text Fixer: could not build keyboard layout tables: {e}")
+			# Translators: reported when the layout conversion could not be performed.
+			ui.message(_("Не удалось выполнить преобразование раскладки."))
+			_beepError()
+			return
+		sourceHkl = self._detectSourceLayout(text, tables)
 		if len(layouts) == 2:
-			self._convertBetweenLayouts(text, layouts[0].hkl, layouts[1].hkl)
+			targetHkl = layouts[1].hkl if layouts[0].hkl == sourceHkl else layouts[0].hkl
+			self._convertWithTables(text, tables[sourceHkl], tables[targetHkl])
 			return
 		# More than two layouts: ask which one to convert into. Showing a wx
 		# dialog must happen on the GUI thread, so this continues
 		# asynchronously in _askLayoutAndConvert.
-		wx.CallAfter(self._askLayoutAndConvert, text, layouts)
+		wx.CallAfter(self._askLayoutAndConvert, text, layouts, tables, sourceHkl)
 
-	def _askLayoutAndConvert(self, text: str, layouts: list) -> None:
+	def _detectSourceLayout(self, text: str, tables: dict) -> int:
+		"""Determine which installed layout the text was typed in.
+
+		Scores each layout's character set against the text; letters
+		discriminate strongly, so the layout that can produce the most of the
+		text is the source. Falls back to the active layout when nothing
+		matches (e.g. punctuation-only text).
+		"""
+		hkls = list(tables)
+		charSets = [{ch for pair in table.values() for ch in pair if ch} for table in tables.values()]
+		activeHkl = winLayout.get_active_layout_hkl()
+		preferred = hkls.index(activeHkl) if activeHkl in hkls else None
+		idx = layoutConversion.detect_source_layout_index(text, charSets, preferred)
+		if idx < 0:
+			return hkls[preferred] if preferred is not None else hkls[0]
+		return hkls[idx]
+
+	def _askLayoutAndConvert(self, text: str, layouts: list, tables: dict, sourceHkl: int) -> None:
 		gui.mainFrame.prePopup()
 		try:
 			dlg = LayoutChoiceDialog(gui.mainFrame, layouts)
@@ -260,20 +324,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		if result != wx.ID_OK or selected is None:
 			# User pressed Escape/Cancel: leave everything untouched.
 			return
-		activeHkl = winLayout.get_active_layout_hkl()
-		self._convertBetweenLayouts(text, activeHkl, selected.hkl)
+		self._convertWithTables(text, tables[sourceHkl], tables[selected.hkl])
 
-	def _convertBetweenLayouts(self, text: str, hklA: int, hklB: int) -> None:
-		try:
-			tableA = winLayout.build_layout_char_table(hklA)
-			tableB = winLayout.build_layout_char_table(hklB)
-		except Exception as e:
-			log.error(f"Text Fixer: could not build keyboard layout tables: {e}")
-			# Translators: reported when the layout conversion could not be performed.
-			ui.message(_("Не удалось выполнить преобразование раскладки."))
-			_beepError()
-			return
-		mapping = layoutConversion.build_char_mapping(tableA, tableB)
+	def _convertWithTables(self, text: str, tableSource: dict, tableTarget: dict) -> None:
+		mapping = layoutConversion.build_directional_mapping(tableSource, tableTarget)
 		converted = layoutConversion.convert_text(text, mapping)
 		if converted == text:
 			# Translators: reported when a command made no changes to the text.

@@ -11,7 +11,7 @@ character table using the Win32 API lives in ``winLayout.py`` next to this
 module and is only exercised at runtime inside NVDA on Windows.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 
 #: For a given layout, maps a virtual-key code to the (unshifted, shifted)
@@ -19,28 +19,58 @@ from collections.abc import Mapping
 LayoutCharTable = Mapping[int, tuple[str, str]]
 
 
-def build_char_mapping(tableA: LayoutCharTable, tableB: LayoutCharTable) -> dict[str, str]:
-	"""Build a bidirectional character mapping between two layouts.
+def build_directional_mapping(
+	tableSource: LayoutCharTable,
+	tableTarget: LayoutCharTable,
+) -> dict[str, str]:
+	"""Build a source->target character mapping between two layouts.
 
 	For every virtual-key code present in both tables, the character produced
-	under ``tableA`` is mapped to the character produced under ``tableB`` at
-	the same physical key/shift-state, and vice versa. This lets
-	:func:`convert_text` auto-detect the conversion direction character by
-	character, since the two layouts' alphabets normally do not overlap.
+	under ``tableSource`` at a given shift state is mapped to the character
+	produced under ``tableTarget`` at the same physical key and shift state.
+
+	Unlike a bidirectional mapping, only one direction is produced, so symbols
+	that sit on *different* physical keys in the two layouts (e.g. "?" on 7 in
+	Russian but on "/" in English) convert deterministically instead of
+	colliding and giving a result that depends on layout iteration order. The
+	caller decides which layout is the source - see
+	:func:`detect_source_layout_index`.
 	"""
 	mapping: dict[str, str] = {}
-	for vk, (unshiftedA, shiftedA) in tableA.items():
-		charsB = tableB.get(vk)
-		if charsB is None:
+	for vk, (unshiftedSource, shiftedSource) in tableSource.items():
+		targetChars = tableTarget.get(vk)
+		if targetChars is None:
 			continue
-		unshiftedB, shiftedB = charsB
-		if unshiftedA and unshiftedB:
-			mapping[unshiftedA] = unshiftedB
-			mapping[unshiftedB] = unshiftedA
-		if shiftedA and shiftedB:
-			mapping[shiftedA] = shiftedB
-			mapping[shiftedB] = shiftedA
+		unshiftedTarget, shiftedTarget = targetChars
+		if unshiftedSource and unshiftedTarget:
+			mapping[unshiftedSource] = unshiftedTarget
+		if shiftedSource and shiftedTarget:
+			mapping[shiftedSource] = shiftedTarget
 	return mapping
+
+
+def detect_source_layout_index(
+	text: str,
+	layoutCharSets: Sequence[set[str]],
+	preferred: int | None = None,
+) -> int:
+	"""Return the index of the layout the text is most likely typed in.
+
+	Each layout is scored by how many of ``text``'s characters that layout's
+	keyboard can produce. Letters discriminate strongly (Cyrillic characters
+	only exist in the Russian table, Latin only in the English table), so the
+	highest-scoring layout is the source. Returns -1 when no layout produces
+	any character of the text. ``preferred`` (the active layout) breaks ties,
+	since punctuation-only text is assumed to have been typed in whatever
+	layout is currently active.
+	"""
+	scores = [sum(1 for ch in text if ch in charset) for charset in layoutCharSets]
+	if not any(scores):
+		return -1
+	best = max(range(len(scores)), key=lambda i: scores[i])
+	if preferred is not None and 0 <= preferred < len(scores) and scores[preferred] == scores[best]:
+		return preferred
+	return best
 
 
 def convert_text(text: str, mapping: Mapping[str, str]) -> str:
