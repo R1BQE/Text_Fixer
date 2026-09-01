@@ -18,15 +18,15 @@ addon_info = AddonInfo(
 	# Add-on summary/title, usually the user visible name of the add-on
 	# Translators: Summary/title for this add-on
 	# to be shown on installation and add-on information found in add-on store
-	addon_summary=_("Дополнение для NVDA, которое помогает быстро исправлять оформление выделенного текста и переключать его между установленными раскладками клавиатуры."),
+	addon_summary=_("Text Fixer"),
 	# Add-on description
 	# Translators: Long description to be shown for this add-on on add-on information from add-on store
 	addon_description=_("""NVDA Text Fixer помогает быстро приводить выделенный текст в порядок: исправляет регистр в начале предложений и строк, убирает лишние пробелы и пробелы перед знаками препинания. Также позволяет переключать выделенный текст между установленными раскладками клавиатуры."""),
 	# version
-	addon_version="2026.9.1.2",
+	addon_version="2026.9.1.3",
 	# Brief changelog for this version
 	# Translators: what's new content for the add-on version to be shown in the add-on store
-	addon_changelog=_("""Исправление: при вставке текста больше не открывается микшер звука Windows. Комбинация Ctrl+V теперь всегда вводится «чистой»: залипшие клавиши Win и Alt перед вводом сбрасываются и возвращаются на место, поэтому Windows не принимает её за Win+Ctrl+V."""),
+	addon_changelog=_("""Исправление: в списке дополнений NVDA теперь показывается короткое название «Text Fixer», а не длинное описание."""),
 	# Author(s)
 	addon_author="R1BQE",
 	# URL for the add-on documentation support
