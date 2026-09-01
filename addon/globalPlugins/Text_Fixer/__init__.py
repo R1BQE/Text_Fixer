@@ -186,16 +186,35 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		``_ctypes.COMError`` in some applications (UWP, Chrome), aborting the
 		whole paste/copy. Injecting the keys directly skips that resolution
 		entirely.
+
+		A Win key left latched (a Win-based gesture or a previous Win command)
+		would turn the injected Ctrl+V into Win+Ctrl+V, which opens the Volume
+		Mixer on Windows 11. Such modifiers are released for the injection and
+		restored afterwards.
 		"""
+		winDown = bool(
+			winUser.getKeyState(winUser.VK_LWIN) & 0x8000 or winUser.getKeyState(winUser.VK_RWIN) & 0x8000
+		)
+		altDown = bool(winUser.getKeyState(winUser.VK_MENU) & 0x8000)
 		ctrlDown = bool(winUser.getKeyState(winUser.VK_CONTROL) & 0x8000)
 		try:
 			with keyboardHandler.ignoreInjection():
+				if winDown:
+					winUser.keybd_event(winUser.VK_LWIN, 0, _KEYUP, 0)
+					winUser.keybd_event(winUser.VK_RWIN, 0, _KEYUP, 0)
+				if altDown:
+					winUser.keybd_event(winUser.VK_MENU, 0, _KEYUP, 0)
 				if not ctrlDown:
 					winUser.keybd_event(winUser.VK_CONTROL, 0, 0, 0)
 				winUser.keybd_event(vk, 0, 0, 0)
 				winUser.keybd_event(vk, 0, _KEYUP, 0)
 				if not ctrlDown:
 					winUser.keybd_event(winUser.VK_CONTROL, 0, _KEYUP, 0)
+				if winDown:
+					winUser.keybd_event(winUser.VK_LWIN, 0, 0, 0)
+					winUser.keybd_event(winUser.VK_RWIN, 0, 0, 0)
+				if altDown:
+					winUser.keybd_event(winUser.VK_MENU, 0, 0, 0)
 			return True
 		except Exception:
 			log.exception("Text Fixer: could not inject Ctrl+%#x", vk)
