@@ -193,7 +193,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		restored afterwards.
 		"""
 		winDown = bool(
-			winUser.getKeyState(winUser.VK_LWIN) & 0x8000 or winUser.getKeyState(winUser.VK_RWIN) & 0x8000
+			winUser.getKeyState(winUser.VK_LWIN) & 0x8000 or winUser.getKeyState(winUser.VK_RWIN) & 0x8000,
 		)
 		altDown = bool(winUser.getKeyState(winUser.VK_MENU) & 0x8000)
 		ctrlDown = bool(winUser.getKeyState(winUser.VK_CONTROL) & 0x8000)
